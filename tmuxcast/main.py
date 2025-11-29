@@ -144,6 +144,10 @@ class TmuxCast:
         
         frame_interval = 1.0 / self.config.fps
         last_content = None
+        last_valid_image = None
+        error_count = 0
+        last_error_time = 0.0
+        last_error_message = None
         
         while self._running:
             loop_start = time.time()
@@ -151,6 +155,10 @@ class TmuxCast:
             try:
                 # Capture terminal content
                 content = self._capture.capture_ansi()
+                
+                # Reset error tracking on successful capture
+                error_count = 0
+                last_error_message = None
                 
                 # Always render and write frames for video continuity
                 # Even if content hasn't changed, we need to maintain frame rate
@@ -162,6 +170,7 @@ class TmuxCast:
                 
                 # Render current state to image
                 img = self._renderer.render()
+                last_valid_image = img  # Store for use when session is unavailable
                 
                 # Resize if needed
                 target_size = (
@@ -177,11 +186,72 @@ class TmuxCast:
                 if self.on_frame:
                     self.on_frame()
                     
+            except RuntimeError as e:
+                error_msg = str(e)
+                current_time = time.time()
+                
+                # Rate limit error messages (max once per 10 seconds)
+                if current_time - last_error_time >= 10.0 or error_msg != last_error_message:
+                    # Check if it's a session loss error
+                    if "can't find session" in error_msg.lower() or "can't find pane" in error_msg.lower():
+                        if self.on_error:
+                            self.on_error(e)
+                        else:
+                            print(f"Session unavailable: {error_msg}", file=sys.stderr)
+                            print("Attempting recovery... (will continue with last frame)", file=sys.stderr)
+                    else:
+                        if self.on_error:
+                            self.on_error(e)
+                        else:
+                            print(f"Capture error: {error_msg}", file=sys.stderr)
+                    
+                    last_error_time = current_time
+                    last_error_message = error_msg
+                
+                error_count += 1
+                
+                # Continue streaming the last valid frame to maintain video continuity
+                if last_valid_image is not None:
+                    try:
+                        target_size = (
+                            self._streamer.config.width,
+                            self._streamer.config.height
+                        )
+                        if last_valid_image.size != target_size:
+                            frame_img = last_valid_image.resize(target_size, Image.Resampling.LANCZOS)
+                        else:
+                            frame_img = last_valid_image
+                        
+                        # Write the last valid frame
+                        self._streamer.write_frame(frame_img.tobytes())
+                    except Exception:
+                        # If we can't write the frame, just continue
+                        pass
+                    
             except Exception as e:
+                # Other unexpected errors
                 if self.on_error:
                     self.on_error(e)
                 else:
-                    print(f"Capture error: {e}", file=sys.stderr)
+                    current_time = time.time()
+                    if current_time - last_error_time >= 10.0:
+                        print(f"Unexpected error: {e}", file=sys.stderr)
+                        last_error_time = current_time
+                
+                # Continue with last valid frame if available
+                if last_valid_image is not None:
+                    try:
+                        target_size = (
+                            self._streamer.config.width,
+                            self._streamer.config.height
+                        )
+                        if last_valid_image.size != target_size:
+                            frame_img = last_valid_image.resize(target_size, Image.Resampling.LANCZOS)
+                        else:
+                            frame_img = last_valid_image
+                        self._streamer.write_frame(frame_img.tobytes())
+                    except Exception:
+                        pass
             
             # Maintain frame rate
             elapsed = time.time() - loop_start

@@ -8,7 +8,7 @@ import subprocess
 import pyte
 from PIL import Image, ImageDraw, ImageFont
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from typing import Optional, List, Tuple, Union
 import io
 
 
@@ -57,6 +57,10 @@ class TmuxCapture:
                    Empty string targets the current pane.
         """
         self.target = target
+        self._original_target = target  # Store original for recovery
+        self._last_error_time = 0.0
+        self._error_count = 0
+        self._recovery_attempts = 0
     
     def capture_text(self) -> str:
         """Capture pane content as plain text."""
@@ -77,8 +81,96 @@ class TmuxCapture:
         
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
-            raise RuntimeError(f"tmux capture failed: {result.stderr}")
+            error_msg = result.stderr.strip()
+            
+            # Check if it's a session not found error
+            if "can't find session" in error_msg.lower() or "can't find pane" in error_msg.lower():
+                # Try to recover
+                recovered = self._try_recover_target()
+                if recovered:
+                    # Retry with recovered target
+                    cmd = ["tmux", "capture-pane", "-p", "-e"]
+                    if self.target:
+                        cmd.extend(["-t", self.target])
+                    result = subprocess.run(cmd, capture_output=True, text=True)
+                    if result.returncode == 0:
+                        # Success after recovery - reset error tracking
+                        self._error_count = 0
+                        self._recovery_attempts = 0
+                        return result.stdout
+            
+            raise RuntimeError(f"tmux capture failed: {error_msg}")
+        
+        # Reset error tracking on success
+        self._error_count = 0
+        self._recovery_attempts = 0
         return result.stdout
+    
+    def _try_recover_target(self) -> bool:
+        """
+        Try to recover the target by finding the session with a different ID.
+        
+        Returns:
+            True if target was recovered, False otherwise
+        """
+        import time
+        
+        # Rate limit recovery attempts (max once per 5 seconds)
+        current_time = time.time()
+        if current_time - self._last_error_time < 5.0:
+            return False
+        
+        self._last_error_time = current_time
+        self._recovery_attempts += 1
+        
+        # Don't try too many times
+        if self._recovery_attempts > 10:
+            return False
+        
+        if not self._original_target:
+            # Can't recover empty target
+            return False
+        
+        # Parse the original target: session:window.pane
+        parts = self._original_target.split(":")
+        if len(parts) != 2:
+            return False
+        
+        original_session = parts[0]
+        window_pane = parts[1]
+        
+        # Try to find the session by name or ID
+        sessions = list_tmux_sessions()
+        
+        # First, try to find by original session ID/name
+        for session_id, session_name in sessions:
+            if session_id == original_session or session_name == original_session:
+                # Found it! Update target
+                self.target = f"{session_id}:{window_pane}"
+                return True
+        
+        # If not found, try to use the first available session as fallback
+        # (only if we've tried a few times and original is definitely gone)
+        if self._recovery_attempts >= 3 and sessions:
+            # Use first available session as fallback
+            session_id, _ = sessions[0]
+            self.target = f"{session_id}:{window_pane}"
+            return True
+        
+        return False
+    
+    def is_target_valid(self) -> bool:
+        """Check if the current target is valid."""
+        if not self.target:
+            # Empty target is always valid (current pane)
+            return True
+        
+        try:
+            # Try to get pane size as a validation check
+            self.get_pane_size()
+            return True
+        except RuntimeError:
+            return False
     
     def get_pane_size(self) -> tuple[int, int]:
         """Get pane dimensions (width, height) in characters."""
@@ -453,13 +545,20 @@ class TerminalRenderer:
         
         return img
     
-    def _resolve_color(self, color: str, default: str) -> str:
-        """Resolve a pyte color to a hex color string."""
+    def _resolve_color(self, color: Union[str, int, tuple, list], default: str) -> str:
+        """
+        Resolve a pyte color to a hex color string.
+        
+        Supports:
+        - Basic 16-color palette (0-15)
+        - 256-color mode (16-255)
+        - True color (24-bit RGB) as hex strings or tuples
+        - Color names (black, red, etc.)
+        """
         if color == "default":
             return default
         
-        # pyte uses color names like "red", "green", etc.
-        # or numbers for 256-color mode
+        # Handle color names
         color_map = {
             "black": 0, "red": 1, "green": 2, "yellow": 3,
             "blue": 4, "magenta": 5, "cyan": 6, "white": 7,
@@ -468,24 +567,101 @@ class TerminalRenderer:
             "brightcyan": 14, "brightwhite": 15,
         }
         
-        if color in color_map:
+        if isinstance(color, str) and color in color_map:
             return self.style.palette[color_map[color]]
         
-        # Try parsing as integer (256-color mode)
-        try:
-            idx = int(color)
+        # Handle hex color strings (true color)
+        if isinstance(color, str) and color.startswith("#"):
+            # Validate hex color format
+            if len(color) == 7 and all(c in "0123456789abcdefABCDEF" for c in color[1:]):
+                return color.lower()
+            elif len(color) == 4:  # Short hex format #RGB
+                # Expand to #RRGGBB
+                return f"#{color[1]}{color[1]}{color[2]}{color[2]}{color[3]}{color[3]}".lower()
+        
+        # Handle RGB tuples/lists (true color)
+        if isinstance(color, (tuple, list)) and len(color) == 3:
+            r, g, b = color
+            if all(isinstance(c, int) and 0 <= c <= 255 for c in (r, g, b)):
+                return f"#{r:02x}{g:02x}{b:02x}"
+        
+        # Handle integer color indices (256-color mode)
+        # Try to parse as integer (handles both int and string representations)
+        if isinstance(color, int):
+            idx = color
+        elif isinstance(color, str) and color.isdigit():
+            try:
+                idx = int(color)
+            except ValueError:
+                idx = None
+        else:
+            idx = None
+        
+        if idx is not None:
+            # Basic 16-color palette (0-15)
             if 0 <= idx < 16:
                 return self.style.palette[idx]
-            # TODO: handle 256-color and true color
-            return default
-        except (ValueError, TypeError):
-            pass
-        
-        # If it looks like a hex color, use it directly
-        if isinstance(color, str) and color.startswith("#"):
-            return color
+            
+            # 256-color mode (16-255)
+            if 16 <= idx <= 255:
+                return self._color_256_to_hex(idx)
         
         return default
+    
+    def _color_256_to_hex(self, idx: int) -> str:
+        """
+        Convert a 256-color index to hex RGB.
+        
+        Color scheme:
+        - 0-15: Standard palette (handled separately)
+        - 16-231: 6x6x6 color cube (216 colors)
+        - 232-255: Grayscale (24 shades)
+        """
+        if idx < 16 or idx > 255:
+            return self.style.palette[0]  # Fallback to black
+        
+        if 16 <= idx <= 231:
+            # 6x6x6 color cube
+            # Colors are arranged as: 16 + 36*r + 6*g + b
+            # where r, g, b are in range [0, 5]
+            idx -= 16
+            r = idx // 36
+            g = (idx // 6) % 6
+            b = idx % 6
+            
+            # Convert to 0-255 range
+            # 0 -> 0, 1 -> 95, 2 -> 135, 3 -> 175, 4 -> 215, 5 -> 255
+            r_val = self._color_cube_value(r)
+            g_val = self._color_cube_value(g)
+            b_val = self._color_cube_value(b)
+            
+            return f"#{r_val:02x}{g_val:02x}{b_val:02x}"
+        
+        elif 232 <= idx <= 255:
+            # Grayscale
+            # 232 -> 8, 233 -> 18, ..., 255 -> 238
+            gray = 8 + (idx - 232) * 10
+            if gray > 255:
+                gray = 255
+            return f"#{gray:02x}{gray:02x}{gray:02x}"
+        
+        return self.style.palette[0]  # Fallback
+    
+    def _color_cube_value(self, level: int) -> int:
+        """Convert color cube level (0-5) to RGB value (0-255)."""
+        # Standard 256-color cube mapping
+        if level == 0:
+            return 0
+        elif level == 1:
+            return 95
+        elif level == 2:
+            return 135
+        elif level == 3:
+            return 175
+        elif level == 4:
+            return 215
+        else:  # level == 5
+            return 255
     
     def render_bytes(self, format: str = "RGB") -> bytes:
         """Render to raw bytes (for ffmpeg input)."""
