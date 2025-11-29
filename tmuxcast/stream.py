@@ -223,19 +223,29 @@ class StreamBuffer:
                 trim = len(self._buffer) - keep_size
                 self._buffer = self._buffer[trim:]
     
-    def read_from(self, position: int, include_header: bool = False) -> tuple[bytes, int]:
+    def read_from(self, position: int, include_header: bool = False, max_bytes: Optional[int] = None) -> tuple[bytes, int]:
         """
-        Read all data from position, return (data, new_position).
+        Read data from position, return (data, new_position).
         
         If include_header is True and position is 0, prepend the MP4 header.
         Returns empty bytes if no new data is available.
+        
+        Args:
+            position: Current read position
+            include_header: Whether to include MP4 header if starting from 0
+            max_bytes: Maximum bytes to read (for throttling to prevent sending all at once)
         """
         with self._lock:
             result = b""
             
             # If starting from 0 and we have a header, include it
             if include_header and position == 0 and self._header:
-                result = self._header
+                header_data = self._header
+                if max_bytes and len(header_data) > max_bytes:
+                    # If header is too large, send it in chunks
+                    result = header_data[:max_bytes]
+                    return result, position + len(result)
+                result = header_data
             
             if position < 0:
                 position = 0
@@ -250,9 +260,18 @@ class StreamBuffer:
             buffer_offset = position - available_start
             if buffer_offset < len(self._buffer):
                 # There's new data to read
-                result += bytes(self._buffer[buffer_offset:])
-                # Update position to end of buffer
-                new_position = self._total_written
+                available_data = bytes(self._buffer[buffer_offset:])
+                
+                # Limit how much we send at once to ensure continuous flow
+                if max_bytes:
+                    # Send in chunks to maintain continuous stream
+                    chunk_size = min(max_bytes, len(available_data))
+                    result += available_data[:chunk_size]
+                    new_position = position + len(result)
+                else:
+                    # Send all available data
+                    result += available_data
+                    new_position = self._total_written
             else:
                 # No new data, position is already at the end
                 new_position = position
@@ -381,26 +400,43 @@ class StreamHandler(BaseHTTPRequestHandler):
         
         position = 0
         first_read = True
+        last_data_sent = time.time()
+        chunk_size = 65536  # 64KB chunks - send data incrementally to maintain continuous flow
         
         while True:
             try:
                 # Check if there's new data available
                 if self.buffer.has_new_data(position) or first_read:
-                    # Read available data
-                    data, new_position = self.buffer.read_from(position, include_header=first_read)
+                    # Read data in chunks to ensure continuous flow
+                    # This prevents sending all buffered data at once
+                    data, new_position = self.buffer.read_from(
+                        position, 
+                        include_header=first_read,
+                        max_bytes=chunk_size  # Limit chunk size for continuous streaming
+                    )
                     first_read = False
                     
                     if data:
-                        # Write data directly without excessive chunking
-                        # Chromecast handles MP4 streams better when data flows naturally
+                        # Write data and flush to ensure delivery
                         self.wfile.write(data)
-                        self.wfile.flush()  # Flush to ensure delivery
+                        self.wfile.flush()
                         position = new_position
+                        last_data_sent = time.time()
+                        
+                        # Small delay to ensure data flows continuously, not in bursts
+                        time.sleep(0.01)  # 10ms delay between chunks
                     else:
                         # No data available yet, wait a bit
-                        time.sleep(0.05)  # Brief sleep if no new data
+                        time.sleep(0.05)
                 else:
-                    # No new data, wait briefly and check again
+                    # No new data in buffer, but keep connection alive
+                    # Send keepalive flush periodically
+                    if time.time() - last_data_sent > 1.0:
+                        try:
+                            self.wfile.flush()  # Keep connection alive
+                            last_data_sent = time.time()
+                        except:
+                            break
                     time.sleep(0.1)  # Wait for new data
                 
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
