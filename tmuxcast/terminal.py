@@ -16,7 +16,7 @@ import io
 class TerminalStyle:
     """Visual style for terminal rendering."""
     font_size: int = 16
-    font_family: str = "DejaVuSansMono.ttf"
+    font_family: str = ""  # Empty string means auto-detect best Unicode-supporting font
     line_height: float = 1.2
     padding: int = 20
     
@@ -309,22 +309,76 @@ class TerminalRenderer:
         self._char_width, self._char_height = self._measure_char()
     
     def _load_font(self) -> ImageFont.FreeTypeFont:
-        """Load a monospace font."""
-        try:
-            return ImageFont.truetype(self.style.font_family, self.style.font_size)
-        except OSError:
-            # Fallback options
-            for fallback in [
+        """Load a monospace font with Unicode box-drawing character support."""
+        import platform
+        
+        # Try the specified font first (if provided and not empty)
+        if self.style.font_family:
+            try:
+                font = ImageFont.truetype(self.style.font_family, self.style.font_size)
+                # Verify it supports box-drawing characters
+                try:
+                    bbox = font.getbbox("├")
+                    if bbox[2] > bbox[0]:  # width > 0
+                        return font
+                except:
+                    pass
+            except OSError:
+                pass
+        
+        # System-specific fonts that support Unicode box-drawing characters
+        system = platform.system()
+        font_candidates = []
+        
+        if system == "Darwin":  # macOS
+            font_candidates = [
+                "/System/Library/Fonts/Menlo.ttc",  # Menlo supports Unicode well
+                "/System/Library/Fonts/Monaco.dfont",
+                "/Library/Fonts/Courier New.ttf",
+                "/System/Library/Fonts/Supplemental/Courier New.ttf",
+            ]
+        elif system == "Linux":
+            font_candidates = [
                 "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
                 "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-                "Courier",
-            ]:
+                "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+                "/usr/share/fonts/truetype/noto/NotoMono-Regular.ttf",
+            ]
+        elif system == "Windows":
+            font_candidates = [
+                "C:/Windows/Fonts/consola.ttf",  # Consolas
+                "C:/Windows/Fonts/cour.ttf",  # Courier New
+            ]
+        
+        # Add common fallbacks (try by name, Pillow will find them)
+        font_candidates.extend([
+            "Menlo",  # macOS system font
+            "Monaco",  # macOS system font
+            "DejaVuSansMono.ttf",
+            "Liberation Mono",
+            "Noto Mono",
+            "Courier New",
+            "Courier",
+        ])
+        
+        # Try each candidate
+        for font_path in font_candidates:
+            try:
+                font = ImageFont.truetype(font_path, self.style.font_size)
+                # Test if font supports box-drawing characters
                 try:
-                    return ImageFont.truetype(fallback, self.style.font_size)
-                except OSError:
+                    bbox = font.getbbox("├")
+                    # If we get a valid bbox, the font supports the character
+                    if bbox[2] > bbox[0]:  # width > 0
+                        return font
+                except Exception:
+                    # Font loaded but might not support the character, try next
                     continue
-            # Last resort: default font
-            return ImageFont.load_default()
+            except (OSError, IOError):
+                continue
+        
+        # Last resort: default font (may not support Unicode well)
+        return ImageFont.load_default()
     
     def _measure_char(self) -> tuple[int, int]:
         """Measure character dimensions for the loaded font."""
@@ -350,12 +404,24 @@ class TerminalRenderer:
         img = Image.new("RGB", (img_width, img_height), self.style.bg_color)
         draw = ImageDraw.Draw(img)
         
-        # Render each character
+        # Render each character - iterate over all rows and columns to ensure nothing is cut off
         for y in range(self.rows):
-            line = self.screen.buffer[y]
+            # Safely get the line, use empty dict if row doesn't exist (defensive)
+            line = self.screen.buffer.get(y, {})
+            
+            # Render all characters that exist in the line
+            # Iterate over all characters in the line to ensure we don't miss any
             for x, char in line.items():
+                # Only render if within expected column range (safety check)
+                if x < 0 or x >= self.cols:
+                    continue
+                
                 px = self.style.padding + x * self._char_width
                 py = self.style.padding + y * self._char_height
+                
+                # Ensure we don't draw outside image bounds (safety check)
+                if px < 0 or py < 0 or px + self._char_width > img_width or py + self._char_height > img_height:
+                    continue
                 
                 # Get colors
                 fg = self._resolve_color(char.fg, default=self.style.fg_color)
