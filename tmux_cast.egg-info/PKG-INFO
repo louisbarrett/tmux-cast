@@ -32,6 +32,22 @@ Stream your tmux sessions to Chromecast devices.
 
 ## Installation
 
+### From Source (Development)
+
+```bash
+# Clone the repository
+git clone <repository-url>
+cd tmux-cast
+
+# Install in development mode
+pip install -e .
+
+# Or install dependencies manually
+pip install pychromecast pyte Pillow
+```
+
+### From PyPI (when published)
+
 ```bash
 pip install tmux-cast
 ```
@@ -41,26 +57,65 @@ pip install tmux-cast
 - ffmpeg (must be in PATH)
 - tmux (for capturing sessions)
 
+**Installing ffmpeg:**
+- macOS: `brew install ffmpeg`
+- Ubuntu/Debian: `sudo apt install ffmpeg`
+- Fedora: `sudo dnf install ffmpeg`
+
 ## Quick Start
+
+### Interactive Demo App (Recommended for First-Time Users)
+
+The easiest way to get started is with the interactive demo app:
+
+```bash
+python interactive_demo.py
+```
+
+This will guide you through:
+1. Selecting a tmux session/window/pane to stream from
+2. Selecting a Chromecast device to stream to
+3. Starting the stream automatically
 
 ### Command Line
 
 ```bash
+# Interactive session selection (will prompt you to choose session/window/pane)
+tmux-cast
+
+# List all available tmux sessions, windows, and panes
+tmux-cast --list-sessions
+
 # List available Chromecast devices
 tmux-cast --list-devices
 
-# Stream current tmux pane to first available Chromecast
-tmux-cast
-
-# Stream to a specific device
+# Stream with interactive selection to a specific Chromecast device
 tmux-cast -d "Living Room TV"
 
-# Stream a specific tmux target
+# Stream a specific tmux target (no prompts)
 tmux-cast -t mysession:0.1 -d "Office TV"
+
+# Use current pane without interactive selection
+tmux-cast --no-interactive
 
 # Just get the stream URL (don't cast automatically)
 tmux-cast --url-only
+
+# Run the demo (doesn't require tmux or Chromecast)
+python demo.py
+
+# Interactive demo app (choose both tmux session and Chromecast)
+python interactive_demo.py
 ```
+
+**Interactive Selection:**
+When you run `tmux-cast` without a target, it will:
+1. Show all available tmux sessions
+2. Let you choose a session
+3. Show all windows in that session
+4. Let you choose a window  
+5. Show all panes in that window (or auto-select if only one)
+6. Start streaming from the selected pane
 
 ### Python API
 

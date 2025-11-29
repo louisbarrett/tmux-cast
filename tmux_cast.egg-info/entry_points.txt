@@ -1,2 +1,3 @@
 [console_scripts]
+tcast = tmuxcast.main:tcast_main
 tmux-cast = tmuxcast.main:main

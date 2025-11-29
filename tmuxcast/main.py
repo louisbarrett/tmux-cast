@@ -491,5 +491,140 @@ def main():
                 time.sleep(1)
 
 
+def tcast_main():
+    """Simplified CLI entry point for tcast command."""
+    import argparse
+    import signal
+    import sys
+    
+    parser = argparse.ArgumentParser(
+        prog="tcast",
+        description="Stream tmux sessions to Chromecast devices (simplified CLI)"
+    )
+    parser.add_argument(
+        "-s", "--source",
+        dest="source",
+        help="tmux session name to stream from (uses window 0, pane 0)"
+    )
+    parser.add_argument(
+        "-t", "--target-device",
+        dest="target_device",
+        help="Chromecast device friendly name to stream to"
+    )
+    parser.add_argument(
+        "--scan",
+        action="store_true",
+        help="Scan and list available Chromecast devices"
+    )
+    parser.add_argument(
+        "--width", type=int, default=1920,
+        help="Output video width (default: 1920)"
+    )
+    parser.add_argument(
+        "--height", type=int, default=1080,
+        help="Output video height (default: 1080)"
+    )
+    parser.add_argument(
+        "--fps", type=int, default=10,
+        help="Frames per second (default: 10)"
+    )
+    
+    args = parser.parse_args()
+    
+    # Scan mode
+    if args.scan:
+        from .cast import discover_and_list
+        discover_and_list()
+        return
+    
+    # Validate required arguments
+    if not args.source:
+        parser.error("--source (-s) is required. Use --scan to find Chromecast devices.")
+    
+    if not args.target_device:
+        parser.error("--target-device (-t) is required. Use --scan to find Chromecast devices.")
+    
+    # Verify tmux session exists
+    from .terminal import list_tmux_sessions
+    sessions = list_tmux_sessions()
+    session_found = False
+    
+    for sid, sname in sessions:
+        if args.source == sname or args.source == sid:
+            session_found = True
+            break
+    
+    if not session_found:
+        print(f"Error: tmux session '{args.source}' not found.")
+        print("\nAvailable tmux sessions:")
+        for sid, sname in sessions:
+            print(f"  - {sname} (id: {sid})")
+        sys.exit(1)
+    
+    # Construct tmux target: session:0.0 (window 0, pane 0)
+    # tmux accepts both session name and session ID in targets
+    tmux_target = f"{args.source}:0.0"
+    
+    print(f"Streaming from tmux session: {args.source} (window 0, pane 0)")
+    print(f"Target Chromecast device: {args.target_device}")
+    print()
+    
+    # Create config
+    config = TmuxCastConfig(
+        tmux_target=tmux_target,
+        output_width=args.width,
+        output_height=args.height,
+        fps=args.fps,
+        device_name=args.target_device,
+    )
+    
+    # Create caster
+    caster = TmuxCast(config)
+    
+    # Handle Ctrl+C gracefully
+    def signal_handler(sig, frame):
+        print("\n\nStopping stream...")
+        caster.stop()
+        print("Done. Goodbye!")
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
+    try:
+        # Start streaming
+        print("Initializing stream...")
+        stream_url = caster.start()
+        print(f"✓ Stream URL: {stream_url}")
+        
+        # Cast to device
+        print(f"\nConnecting to {args.target_device}...")
+        caster.cast_to(args.target_device)
+        print(f"✓ Casting to: {args.target_device}")
+        
+        print("\n" + "=" * 60)
+        print("Streaming Active!")
+        print("=" * 60)
+        print(f"\nStreaming from: {tmux_target}")
+        print(f"Streaming to: {args.target_device}")
+        print(f"Stream URL: {stream_url}")
+        print("\nThe stream is now active on your Chromecast.")
+        print("Press Ctrl+C to stop streaming.\n")
+        
+        # Keep running until interrupted
+        while caster.is_running:
+            time.sleep(1)
+            
+    except KeyboardInterrupt:
+        signal_handler(None, None)
+    except Exception as e:
+        print(f"\nError: {e}")
+        if stream_url:
+            print(f"\nStream URL is still available: {stream_url}")
+            print("You can open it manually in a media player.")
+        caster.stop()
+        sys.exit(1)
+
+
 if __name__ == "__main__":
     main()

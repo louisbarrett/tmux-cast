@@ -6,6 +6,20 @@ Stream your tmux sessions to Chromecast devices.
 
 ### From Source (Development)
 
+**Using uv (Recommended):**
+```bash
+# Clone the repository
+git clone <repository-url>
+cd tmux-cast
+
+# Install with uv
+uv sync
+
+# Or install in development mode
+uv pip install -e .
+```
+
+**Using pip:**
 ```bash
 # Clone the repository
 git clone <repository-url>
@@ -36,9 +50,43 @@ pip install tmux-cast
 
 ## Quick Start
 
-### Interactive Demo App (Recommended for First-Time Users)
+### `tcast` - Simple CLI Tool (Recommended)
 
-The easiest way to get started is with the interactive demo app:
+The simplest way to stream a tmux session to Chromecast:
+
+```bash
+# Scan for Chromecast devices
+tcast --scan
+# or with uv: uv run tcast --scan
+
+# Stream a tmux session (uses window 0, pane 0 automatically)
+tcast --source mysession --target-device "Office TV"
+# or with uv: uv run tcast --source mysession --target-device "Office TV"
+
+# Using short flags
+tcast -s mysession -t "Office TV"
+
+# With custom video settings
+tcast -s mysession -t "Office TV" --width 1280 --height 720 --fps 15
+```
+
+**Note:** If using `uv`, prefix commands with `uv run`:
+```bash
+uv run tcast --scan
+uv run tcast -s mysession -t "Office TV"
+```
+
+**Or activate the virtual environment:**
+```bash
+source .venv/bin/activate  # After uv sync
+tcast --scan
+tcast -s mysession -t "Office TV"
+deactivate
+```
+
+### Interactive Demo App
+
+The interactive demo app guides you through selection:
 
 ```bash
 python interactive_demo.py
@@ -49,7 +97,7 @@ This will guide you through:
 2. Selecting a Chromecast device to stream to
 3. Starting the stream automatically
 
-### Command Line
+### Full Command Line (`tmux-cast`)
 
 ```bash
 # Interactive session selection (will prompt you to choose session/window/pane)
@@ -88,6 +136,10 @@ When you run `tmux-cast` without a target, it will:
 4. Let you choose a window  
 5. Show all panes in that window (or auto-select if only one)
 6. Start streaming from the selected pane
+
+**Difference between `tcast` and `tmux-cast`:**
+- `tcast`: Simple CLI - just specify session name and Chromecast device (always uses window 0, pane 0)
+- `tmux-cast`: Full-featured CLI with interactive selection and more options
 
 ### Python API
 

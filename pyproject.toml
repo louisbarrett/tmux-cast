@@ -37,6 +37,7 @@ dev = [
 
 [project.scripts]
 tmux-cast = "tmuxcast.main:main"
+tcast = "tmuxcast.main:tcast_main"
 
 [project.urls]
 Homepage = "https://github.com/yourusername/tmux-cast"
